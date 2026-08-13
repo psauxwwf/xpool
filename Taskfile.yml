@@ -1,0 +1,62 @@
+---
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: "3"
+
+dotenv: ["build.env"]
+
+vars:
+  gobin: go
+  ldflags: "-extldflags '-static' -w -s -buildid="
+  gcflags: "all=-trimpath={{.PWD}} -dwarf=false -l"
+  asmflags: "all=-trimpath={{.PWD}}"
+  bin: "{{.PWD}}/bin"
+  app: "xpool"
+  app_bin: "{{.bin}}/{{.app}}"
+  repo_name:
+    sh: basename "{{.PWD}}"
+
+env:
+  COMPOSE_BAKE: true
+  CGO_ENABLED: 0
+  GOARCH: amd64
+  GOOS: linux
+
+tasks:
+  setup:
+    desc: set up the environment
+    internal: true
+    silent: true
+    cmds:
+      - mkdir -p "{{.bin}}"
+
+  build:
+    desc: common build
+    deps:
+      - setup
+    cmds:
+      - >
+        {{.gobin}} build
+        -tags netgo
+        -ldflags="{{.ldflags}}"
+        -trimpath
+        -gcflags="{{.gcflags}}"
+        -asmflags="{{.asmflags}}"
+        -o "{{.app_bin}}"
+        ./cmd/{{.app}}
+      - strip "{{.app_bin}}"
+      - objcopy --strip-unneeded "{{.app_bin}}"
+
+  test:
+    desc: run test
+    cmds:
+      - go fix ./...
+      - go test ./...
+
+  run:
+    desc: generate config and run Xray controller
+    silent: true
+    preconditions:
+      - test -f proxy.txt
+      - which xray
+    cmds:
+      - go run ./cmd/{{.app}} run
