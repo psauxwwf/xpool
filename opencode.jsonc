@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "read": {
+      "proxy.txt": "deny",
+      "proxy_gox.sh": "deny",
+      "proxy_nosok.sh": "deny"
+    }
+  }
+}
