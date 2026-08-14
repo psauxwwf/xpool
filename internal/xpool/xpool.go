@@ -13,6 +13,7 @@ const (
 	DefaultConfigPath        = runner.DefaultConfigPath
 	DefaultXrayPath          = runner.DefaultXrayPath
 	DefaultAPIAddress        = configgen.DefaultAPIAddress
+	DefaultStatusAddress     = runner.DefaultStatusAddress
 	DefaultRotationInterval  = runner.DefaultRotationInterval
 	DefaultCheckURL          = configgen.DefaultCheckURL
 	DefaultCheckInterval     = configgen.DefaultCheckInterval

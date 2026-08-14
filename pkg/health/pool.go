@@ -36,6 +36,24 @@ type State struct {
 	ConsecutiveFailures int
 }
 
+type Snapshot struct {
+	Total     int             `json:"total"`
+	Ready     int             `json:"ready"`
+	ReadyTTL  string          `json:"ready_ttl"`
+	CheckURLs []string        `json:"check_urls"`
+	States    []StateSnapshot `json:"states"`
+}
+
+type StateSnapshot struct {
+	Tag                 string `json:"tag"`
+	Alive               bool   `json:"alive"`
+	Ready               bool   `json:"ready"`
+	LastSuccess         any    `json:"last_success"`
+	LastError           string `json:"last_error,omitempty"`
+	Duration            string `json:"duration,omitempty"`
+	ConsecutiveFailures int    `json:"consecutive_failures"`
+}
+
 func NewPool(routes []Route, checkURLs []string, checkInterval, timeout, readyTTL time.Duration) (*Pool, error) {
 	states := make(map[string]State, len(routes))
 	clients := make(map[string]*http.Client, len(routes))
@@ -80,6 +98,45 @@ func (p *Pool) Ready() []State {
 			}
 		}
 		result <- ready
+	}
+	return <-result
+}
+
+func (p *Pool) Snapshot() Snapshot {
+	result := make(chan Snapshot, 1)
+	p.mu <- func() {
+		now := time.Now()
+		snapshot := Snapshot{
+			Total:     len(p.states),
+			ReadyTTL:  p.readyTTL.String(),
+			CheckURLs: append([]string(nil), p.checkURLs...),
+			States:    make([]StateSnapshot, 0, len(p.routes)),
+		}
+		for _, route := range p.routes {
+			state := p.states[route.Tag]
+			ready := state.Alive && now.Sub(state.LastSuccess) <= p.readyTTL
+			if ready {
+				snapshot.Ready++
+			}
+			lastSuccess := any(nil)
+			if !state.LastSuccess.IsZero() {
+				lastSuccess = state.LastSuccess.UTC().Format(time.RFC3339)
+			}
+			duration := ""
+			if state.Duration > 0 {
+				duration = state.Duration.String()
+			}
+			snapshot.States = append(snapshot.States, StateSnapshot{
+				Tag:                 state.Tag,
+				Alive:               state.Alive,
+				Ready:               ready,
+				LastSuccess:         lastSuccess,
+				LastError:           state.LastError,
+				Duration:            duration,
+				ConsecutiveFailures: state.ConsecutiveFailures,
+			})
+		}
+		result <- snapshot
 	}
 	return <-result
 }

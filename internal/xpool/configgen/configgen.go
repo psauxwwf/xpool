@@ -64,6 +64,11 @@ func Generate(options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	return GenerateFromProxies(proxies, options)
+}
+
+func GenerateFromProxies(proxies []Proxy, options Options) (Result, error) {
+	options = withDefaults(options)
 	if len(proxies) == 0 {
 		return Result{}, fmt.Errorf("no proxies found")
 	}

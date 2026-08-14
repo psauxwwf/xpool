@@ -31,3 +31,11 @@
 - [x] 20. Split reusable packages into `pkg/fs`, `pkg/xray`, and `pkg/health`.
 - [x] 21. Make `cmd/xpool` import only `internal/xpool`.
 - [x] 22. Keep Cobra/Fang/configureLogger in `cmd/xpool/main.go` and expose app logic through `internal/xpool/xpool.go`.
+
+## Operational API
+
+- [x] 23. Add status snapshots for the health pool and controller.
+- [x] 24. Add local HTTP `/healthz` and `/status` endpoints.
+- [x] 25. Track `healthy` separately from `serving`.
+- [x] 26. Add activation gating before balancer override.
+- [x] 27. Add a file proxy source abstraction ready for future dynamic subscription refresh.

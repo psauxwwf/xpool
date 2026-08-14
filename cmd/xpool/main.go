@@ -27,6 +27,7 @@ type runOptions struct {
 	ConfigPath        string
 	XrayPath          string
 	APIAddress        string
+	StatusAddress     string
 	RotationInterval  string
 	CheckURLsRaw      string
 	CheckInterval     string
@@ -77,6 +78,7 @@ func runCmd() *cobra.Command {
 		ConfigPath:        xpool.DefaultConfigPath,
 		XrayPath:          xpool.DefaultXrayPath,
 		APIAddress:        xpool.DefaultAPIAddress,
+		StatusAddress:     xpool.DefaultStatusAddress,
 		RotationInterval:  xpool.DefaultRotationInterval.String(),
 		CheckURLsRaw:      xpool.DefaultCheckURL,
 		CheckInterval:     xpool.DefaultCheckInterval.String(),
@@ -134,6 +136,7 @@ func runCmd() *cobra.Command {
 				ConfigPath:        options.ConfigPath,
 				XrayPath:          options.XrayPath,
 				APIAddress:        options.APIAddress,
+				StatusAddress:     options.StatusAddress,
 				RotationInterval:  rotationInterval,
 				CheckURLs:         checkURLs,
 				CheckInterval:     checkInterval,
@@ -149,6 +152,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().StringVar(&options.ConfigPath, "config", options.ConfigPath, "Xray config path")
 	cmd.Flags().StringVar(&options.XrayPath, "xray", options.XrayPath, "Xray executable path")
 	cmd.Flags().StringVar(&options.APIAddress, "api-addr", options.APIAddress, "Xray API address")
+	cmd.Flags().StringVar(&options.StatusAddress, "status-addr", options.StatusAddress, "status HTTP API address, set to off to disable")
 	cmd.Flags().StringVar(&options.RotationInterval, "rotation-interval", options.RotationInterval, "ready outbound rotation interval")
 	cmd.Flags().StringVar(&options.CheckURLsRaw, "check-url", options.CheckURLsRaw, "comma-separated full-download check URLs")
 	cmd.Flags().StringVar(&options.CheckInterval, "check-interval", options.CheckInterval, "background check interval")

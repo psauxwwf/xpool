@@ -2,11 +2,15 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"sync"
 	"time"
 
 	"xpool/internal/xpool/configgen"
+	"xpool/internal/xpool/source"
 	"xpool/pkg/health"
 	"xpool/pkg/xray"
 )
@@ -14,6 +18,7 @@ import (
 const (
 	DefaultXrayPath         = "xray"
 	DefaultConfigPath       = configgen.DefaultOutputPath
+	DefaultStatusAddress    = "127.0.0.1:18080"
 	DefaultRotationInterval = time.Minute
 	DefaultReadyTTL         = 10 * time.Minute
 	DefaultStartupTimeout   = 30 * time.Second
@@ -25,6 +30,7 @@ type Options struct {
 	ConfigPath        string
 	XrayPath          string
 	APIAddress        string
+	StatusAddress     string
 	RotationInterval  time.Duration
 	CheckURLs         []string
 	CheckInterval     time.Duration
@@ -34,6 +40,34 @@ type Options struct {
 	PingTimeout       time.Duration
 	Sampling          int
 	GeneratedLogLevel string
+}
+
+type SourceStatus struct {
+	Name       string `json:"name"`
+	LoadedAt   string `json:"loaded_at"`
+	ProxyCount int    `json:"proxy_count"`
+}
+
+type Status struct {
+	Healthy          bool            `json:"healthy"`
+	Serving          bool            `json:"serving"`
+	StartedAt        string          `json:"started_at"`
+	Current          string          `json:"current,omitempty"`
+	BalancerTag      string          `json:"balancer_tag"`
+	RotationInterval string          `json:"rotation_interval"`
+	Source           SourceStatus    `json:"source"`
+	Pool             health.Snapshot `json:"pool"`
+	Switches         SwitchStatus    `json:"switches"`
+}
+
+type SwitchStatus struct {
+	Rotations       int64  `json:"rotations"`
+	Failovers       int64  `json:"failovers"`
+	Failures        int64  `json:"failures"`
+	LastReason      string `json:"last_reason,omitempty"`
+	LastSelectedAt  any    `json:"last_selected_at"`
+	LastError       string `json:"last_error,omitempty"`
+	LastErrorReason string `json:"last_error_reason,omitempty"`
 }
 
 func ParseDuration(name, value string) (time.Duration, error) {
@@ -46,9 +80,21 @@ func ParseDuration(name, value string) (time.Duration, error) {
 
 func Run(ctx context.Context, options Options) error {
 	options = withDefaults(options)
+	return RunWithSource(ctx, options, source.File{Path: options.InputPath})
+}
 
-	result, err := configgen.Generate(configgen.Options{
-		InputPath:     options.InputPath,
+func RunWithSource(ctx context.Context, options Options, proxySource source.Source) error {
+	options = withDefaults(options)
+	if proxySource == nil {
+		proxySource = source.File{Path: options.InputPath}
+	}
+
+	sourceResult, err := proxySource.Load(ctx)
+	if err != nil {
+		return err
+	}
+
+	result, err := configgen.GenerateFromProxies(sourceResult.Proxies, configgen.Options{
 		OutputPath:    options.ConfigPath,
 		APIAddress:    options.APIAddress,
 		CheckURLs:     options.CheckURLs,
@@ -60,7 +106,7 @@ func Run(ctx context.Context, options Options) error {
 	if err != nil {
 		return err
 	}
-	slog.Info("generated Xray config", "path", result.OutputPath, "proxies", result.ProxyCount)
+	slog.Info("generated Xray config", "path", result.OutputPath, "source", sourceResult.Name, "proxies", result.ProxyCount)
 
 	process, err := xray.Start(options.XrayPath, options.ConfigPath)
 	if err != nil {
@@ -79,14 +125,23 @@ func Run(ctx context.Context, options Options) error {
 	}
 	pool.Start(ctx)
 
-	controller := Controller{
+	controller := &Controller{
 		xrayPath:         options.XrayPath,
 		apiAddress:       options.APIAddress,
 		balancerTag:      configgen.DefaultBalancerTag,
 		rotationInterval: options.RotationInterval,
 		startupTimeout:   options.StartupTimeout,
 		pool:             pool,
+		startedAt:        time.Now(),
+		source: SourceStatus{
+			Name:       sourceResult.Name,
+			LoadedAt:   sourceResult.LoadedAt.UTC().Format(time.RFC3339),
+			ProxyCount: len(sourceResult.Proxies),
+		},
 	}
+	statusServer := startStatusServer(ctx, options.StatusAddress, controller)
+	defer shutdownStatusServer(statusServer)
+
 	return controller.Run(ctx, process.Done())
 }
 
@@ -98,6 +153,17 @@ type Controller struct {
 	startupTimeout   time.Duration
 	pool             *health.Pool
 	current          string
+	serving          bool
+	startedAt        time.Time
+	source           SourceStatus
+	rotations        int64
+	failovers        int64
+	switchFailures   int64
+	lastReason       string
+	lastSelectedAt   time.Time
+	lastError        string
+	lastErrorReason  string
+	mu               sync.RWMutex
 }
 
 func (c *Controller) Run(ctx context.Context, xrayDone <-chan error) error {
@@ -105,6 +171,7 @@ func (c *Controller) Run(ctx context.Context, xrayDone <-chan error) error {
 		return err
 	}
 	if err := c.switchToNext(ctx, "startup"); err != nil {
+		c.recordSwitchFailure("startup", err)
 		return err
 	}
 
@@ -124,13 +191,15 @@ func (c *Controller) Run(ctx context.Context, xrayDone <-chan error) error {
 			return nil
 		case <-rotationTicker.C:
 			if err := c.switchToNext(ctx, "rotation"); err != nil {
+				c.recordSwitchFailure("rotation", err)
 				slog.Error("rotation switch failed", "error", err)
 			}
 		case <-failoverTicker.C:
-			if c.current != "" && c.pool.IsReady(c.current) {
+			if c.currentTag() != "" && c.pool.IsReady(c.currentTag()) {
 				continue
 			}
 			if err := c.switchToNext(ctx, "failover"); err != nil {
+				c.recordSwitchFailure("failover", err)
 				slog.Error("failover switch failed", "error", err)
 			}
 		}
@@ -169,25 +238,153 @@ func (c *Controller) switchToNext(ctx context.Context, reason string) error {
 	}
 
 	next := ready[0].Tag
-	if len(ready) > 1 && c.current != "" {
+	current := c.currentTag()
+	if len(ready) > 1 && current != "" {
 		for i, state := range ready {
-			if state.Tag == c.current {
+			if state.Tag == current {
 				next = ready[(i+1)%len(ready)].Tag
 				break
 			}
 		}
 	}
-	if next == c.current {
+	if next == current {
 		slog.Debug("proxy override unchanged", "tag", next, "reason", reason)
 		return nil
+	}
+	if !c.pool.IsReady(next) {
+		return fmt.Errorf("candidate %s is no longer ready", next)
 	}
 	if err := xray.OverrideBalancer(ctx, c.xrayPath, c.apiAddress, c.balancerTag, next); err != nil {
 		return err
 	}
-	previous := c.current
-	c.current = next
+	previous := current
+	c.recordSwitchSuccess(reason, next)
 	slog.Info("selected ready proxy", "previous", previous, "tag", next, "reason", reason, "ready", len(ready), "ready_tags", health.StateTags(ready))
 	return nil
+}
+
+func (c *Controller) Healthy() bool {
+	return c.pool.Snapshot().Ready > 0
+}
+
+func (c *Controller) Status() Status {
+	pool := c.pool.Snapshot()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	currentReady := false
+	for _, state := range pool.States {
+		if state.Tag == c.current && state.Ready {
+			currentReady = true
+			break
+		}
+	}
+
+	lastSelectedAt := any(nil)
+	if !c.lastSelectedAt.IsZero() {
+		lastSelectedAt = c.lastSelectedAt.UTC().Format(time.RFC3339)
+	}
+	return Status{
+		Healthy:          pool.Ready > 0,
+		Serving:          c.serving && currentReady,
+		StartedAt:        c.startedAt.UTC().Format(time.RFC3339),
+		Current:          c.current,
+		BalancerTag:      c.balancerTag,
+		RotationInterval: c.rotationInterval.String(),
+		Source:           c.source,
+		Pool:             pool,
+		Switches: SwitchStatus{
+			Rotations:       c.rotations,
+			Failovers:       c.failovers,
+			Failures:        c.switchFailures,
+			LastReason:      c.lastReason,
+			LastSelectedAt:  lastSelectedAt,
+			LastError:       c.lastError,
+			LastErrorReason: c.lastErrorReason,
+		},
+	}
+}
+
+func (c *Controller) currentTag() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.current
+}
+
+func (c *Controller) recordSwitchSuccess(reason, tag string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.current = tag
+	c.serving = true
+	c.lastReason = reason
+	c.lastSelectedAt = time.Now()
+	c.lastError = ""
+	c.lastErrorReason = ""
+	if reason == "rotation" {
+		c.rotations++
+	}
+	if reason == "failover" {
+		c.failovers++
+	}
+}
+
+func (c *Controller) recordSwitchFailure(reason string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.switchFailures++
+	c.lastError = err.Error()
+	c.lastErrorReason = reason
+	if reason == "startup" || reason == "failover" {
+		c.serving = false
+	}
+}
+
+func startStatusServer(ctx context.Context, address string, controller *Controller) *http.Server {
+	if address == "" || address == "off" {
+		return nil
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		status := controller.Status()
+		if !status.Healthy {
+			http.Error(w, "ready pool is empty", http.StatusServiceUnavailable)
+			return
+		}
+		if !status.Serving {
+			http.Error(w, "not serving", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(controller.Status())
+	})
+
+	server := &http.Server{Addr: address, Handler: mux}
+	go func() {
+		slog.Info("status API listening", "addr", address)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("status API failed", "error", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdownStatusServer(server)
+	}()
+	return server
+}
+
+func shutdownStatusServer(server *http.Server) {
+	if server == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = server.Shutdown(ctx)
 }
 
 func withDefaults(options Options) Options {
@@ -202,6 +399,9 @@ func withDefaults(options Options) Options {
 	}
 	if options.APIAddress == "" {
 		options.APIAddress = configgen.DefaultAPIAddress
+	}
+	if options.StatusAddress == "" {
+		options.StatusAddress = DefaultStatusAddress
 	}
 	if options.RotationInterval == 0 {
 		options.RotationInterval = DefaultRotationInterval

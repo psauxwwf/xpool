@@ -4,7 +4,8 @@
     "read": {
       "proxy.txt": "deny",
       "proxy_gox.sh": "deny",
-      "proxy_nosok.sh": "deny"
+      "proxy_nosok.sh": "deny",
+      "config.json": "deny"
     }
   }
 }
