@@ -20,33 +20,17 @@ const (
 	DefaultListenPort     = 8080
 	DefaultLocalListen    = "127.0.0.1"
 	DefaultLocalPort      = 8000
-	DefaultOutputPath     = appconfig.DefaultGeneratedPath
-	DefaultAPIAddress     = appconfig.DefaultAPIAddress
 	DefaultCheckPortBase  = 18000
-	DefaultCheckURL       = appconfig.DefaultCheckURL
-	DefaultCheckInterval  = appconfig.DefaultCheckInterval
-	DefaultPingTimeout    = appconfig.DefaultPingTimeout
-	DefaultSampling       = appconfig.DefaultSampling
 	DefaultBalancerTag    = "proxy-balancer"
 	DefaultOutboundPrefix = "socks-"
 )
 
-type Options struct {
-	OutputPath    string
-	APIAddress    string
-	CheckURLs     []string
-	CheckInterval time.Duration
-	PingTimeout   time.Duration
-	Sampling      int
-	LogLevel      string
-}
-
 type Result struct {
-	OutputPath  string
-	ProxyCount  int
-	Mode        string
-	Tags        []string
-	CheckRoutes []health.Route
+	GeneratedConfigPath string
+	ProxyCount          int
+	Mode                string
+	Tags                []string
+	CheckRoutes         []health.Route
 }
 
 type Proxy struct {
@@ -57,11 +41,11 @@ type Proxy struct {
 }
 
 type Generator struct {
-	Options Options
+	Config appconfig.Config
 }
 
-func NewGenerator(options Options) Generator {
-	return Generator{Options: withDefaults(options)}
+func NewGenerator(config appconfig.Config) Generator {
+	return Generator{Config: config}
 }
 
 type ParseError struct {
@@ -70,7 +54,7 @@ type ParseError struct {
 }
 
 func (g Generator) Generate(proxies []Proxy) (Result, error) {
-	options := withDefaults(g.Options)
+	config := g.Config
 	if len(proxies) == 0 {
 		return Result{}, fmt.Errorf("no proxies found")
 	}
@@ -80,21 +64,21 @@ func (g Generator) Generate(proxies []Proxy) (Result, error) {
 
 	tags := proxyTags(len(proxies))
 	checkRoutes := checkRoutes(tags)
-	cfg, err := BuildConfig(proxies, options)
+	cfg, err := BuildConfig(proxies, config)
 	if err != nil {
 		return Result{}, err
 	}
 
-	if err := fs.WriteJSON(options.OutputPath, cfg); err != nil {
+	if err := fs.WriteJSON(config.Xray.GeneratedConfigPath, cfg); err != nil {
 		return Result{}, err
 	}
 
 	return Result{
-		OutputPath:  options.OutputPath,
-		ProxyCount:  len(proxies),
-		Mode:        "xray leastPing + background pool",
-		Tags:        tags,
-		CheckRoutes: checkRoutes,
+		GeneratedConfigPath: config.Xray.GeneratedConfigPath,
+		ProxyCount:          len(proxies),
+		Mode:                "xray leastPing + background pool",
+		Tags:                tags,
+		CheckRoutes:         checkRoutes,
 	}, nil
 }
 
@@ -158,9 +142,8 @@ func ParseProxy(raw string) (Proxy, error) {
 	return Proxy{Username: username, Password: password, Host: host, Port: port}, nil
 }
 
-func BuildConfig(proxies []Proxy, options Options) (xray.Config, error) {
-	options = withDefaults(options)
-	apiListen, apiPort, err := splitHostPort(options.APIAddress)
+func BuildConfig(proxies []Proxy, config appconfig.Config) (xray.Config, error) {
+	apiListen, apiPort, err := splitHostPort(config.Xray.GRPCAPIAddress)
 	if err != nil {
 		return xray.Config{}, err
 	}
@@ -234,7 +217,7 @@ func BuildConfig(proxies []Proxy, options Options) (xray.Config, error) {
 	)
 
 	return xray.Config{
-		Log: xray.LogConfig{LogLevel: options.LogLevel},
+		Log: xray.LogConfig{LogLevel: config.Xray.GeneratedConfigLogLevel},
 		API: xray.APIConfig{
 			Tag:      "api",
 			Services: []string{"HandlerService", "LoggerService", "RoutingService", "StatsService"},
@@ -265,10 +248,10 @@ func BuildConfig(proxies []Proxy, options Options) (xray.Config, error) {
 		BurstObservatory: xray.BurstObservatoryConfig{
 			SubjectSelector: []string{DefaultOutboundPrefix},
 			PingConfig: xray.PingConfig{
-				Destination: options.CheckURLs[0],
-				Interval:    formatDuration(options.CheckInterval),
-				Sampling:    options.Sampling,
-				Timeout:     formatDuration(options.PingTimeout),
+				Destination: config.Health.FullDownloadCheckURLs[0],
+				Interval:    formatDuration(config.Health.ActiveRoutesCheckInterval.Duration()),
+				Sampling:    config.Xray.ObservatorySampling,
+				Timeout:     formatDuration(config.Xray.ObservatoryPingTimeout.Duration()),
 				HTTPMethod:  "GET",
 			},
 		},
@@ -296,31 +279,6 @@ func checkRoutes(tags []string) []health.Route {
 		}
 	}
 	return routes
-}
-
-func withDefaults(options Options) Options {
-	if options.OutputPath == "" {
-		options.OutputPath = DefaultOutputPath
-	}
-	if options.APIAddress == "" {
-		options.APIAddress = DefaultAPIAddress
-	}
-	if len(options.CheckURLs) == 0 {
-		options.CheckURLs = []string{DefaultCheckURL}
-	}
-	if options.CheckInterval == 0 {
-		options.CheckInterval = DefaultCheckInterval
-	}
-	if options.PingTimeout == 0 {
-		options.PingTimeout = DefaultPingTimeout
-	}
-	if options.Sampling == 0 {
-		options.Sampling = DefaultSampling
-	}
-	if options.LogLevel == "" {
-		options.LogLevel = "warning"
-	}
-	return options
 }
 
 func splitHostPort(address string) (string, int, error) {

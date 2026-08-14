@@ -36,6 +36,7 @@ const (
 	DefaultCheckMaxBytes    = 10 * 1024 * 1024
 	DefaultCheckConcurrency = 32
 	DefaultReadySuccesses   = 1
+	DefaultRetireFailures   = 1
 	DefaultSampling         = 3
 )
 
@@ -49,42 +50,43 @@ type Config struct {
 }
 
 type LogConfig struct {
-	Level string `yaml:"level"`
-	Path  string `yaml:"path"`
+	MinimumLevel string `yaml:"minimum_level"`
+	FilePath     string `yaml:"file_path"`
 }
 
 type SourceConfig struct {
-	File string `yaml:"file"`
+	ProxyListFilePath string `yaml:"proxy_list_file_path"`
 }
 
 type XrayConfig struct {
-	BinaryPath        string   `yaml:"binary_path"`
-	GeneratedPath     string   `yaml:"generated_path"`
-	APIAddress        string   `yaml:"api_address"`
-	GeneratedLogLevel string   `yaml:"generated_log_level"`
-	PingTimeout       Duration `yaml:"ping_timeout"`
-	Sampling          int      `yaml:"sampling"`
+	ExecutablePath          string   `yaml:"executable_path"`
+	GeneratedConfigPath     string   `yaml:"generated_config_path"`
+	GRPCAPIAddress          string   `yaml:"grpc_api_address"`
+	GeneratedConfigLogLevel string   `yaml:"generated_config_log_level"`
+	ObservatoryPingTimeout  Duration `yaml:"observatory_ping_timeout"`
+	ObservatorySampling     int      `yaml:"observatory_sampling"`
 }
 
 type StatusConfig struct {
-	Address string `yaml:"address"`
+	ListenAddress string `yaml:"listen_address"`
 }
 
 type RuntimeConfig struct {
-	RotationInterval Duration `yaml:"rotation_interval"`
-	StartupTimeout   Duration `yaml:"startup_timeout"`
-	FailoverCooldown Duration `yaml:"failover_cooldown"`
+	ProxyRotationInterval   Duration `yaml:"proxy_rotation_interval"`
+	StartupReadyTimeout     Duration `yaml:"startup_ready_timeout"`
+	FailoverAttemptCooldown Duration `yaml:"failover_attempt_cooldown"`
 }
 
 type HealthConfig struct {
-	CheckURLs      []string `yaml:"check_urls"`
-	CheckInterval  Duration `yaml:"check_interval"`
-	ReadyTTL       Duration `yaml:"ready_ttl"`
-	Timeout        Duration `yaml:"timeout"`
-	Concurrency    int      `yaml:"concurrency"`
-	Jitter         Duration `yaml:"jitter"`
-	MaxBytes       int64    `yaml:"max_bytes"`
-	ReadySuccesses int      `yaml:"ready_successes"`
+	FullDownloadCheckURLs     []string `yaml:"full_download_check_urls"`
+	ActiveRoutesCheckInterval Duration `yaml:"active_routes_check_interval"`
+	SuccessfulCheckReadyTTL   Duration `yaml:"successful_check_ready_ttl"`
+	FullDownloadCheckTimeout  Duration `yaml:"full_download_check_timeout"`
+	MaxConcurrentChecks       int      `yaml:"max_concurrent_checks"`
+	CheckStartJitter          Duration `yaml:"check_start_jitter"`
+	MaxDownloadBytes          int64    `yaml:"max_download_bytes"`
+	RequiredSuccessfulChecks  int      `yaml:"required_successful_checks"`
+	FailedChecksBeforeRetire  int      `yaml:"failed_checks_before_retire"`
 }
 
 type Duration time.Duration
@@ -92,41 +94,42 @@ type Duration time.Duration
 func Default() Config {
 	return Config{
 		Log: LogConfig{
-			Level: DefaultLogLevel,
+			MinimumLevel: DefaultLogLevel,
 		},
 		Source: SourceConfig{
-			File: DefaultInputPath,
+			ProxyListFilePath: DefaultInputPath,
 		},
 		Xray: XrayConfig{
-			BinaryPath:        DefaultXrayPath,
-			GeneratedPath:     DefaultGeneratedPath,
-			APIAddress:        DefaultAPIAddress,
-			GeneratedLogLevel: DefaultGeneratedLogLevel,
-			PingTimeout:       Duration(DefaultPingTimeout),
-			Sampling:          DefaultSampling,
+			ExecutablePath:          DefaultXrayPath,
+			GeneratedConfigPath:     DefaultGeneratedPath,
+			GRPCAPIAddress:          DefaultAPIAddress,
+			GeneratedConfigLogLevel: DefaultGeneratedLogLevel,
+			ObservatoryPingTimeout:  Duration(DefaultPingTimeout),
+			ObservatorySampling:     DefaultSampling,
 		},
 		Status: StatusConfig{
-			Address: DefaultStatusAddress,
+			ListenAddress: DefaultStatusAddress,
 		},
 		Runtime: RuntimeConfig{
-			RotationInterval: Duration(DefaultRotationInterval),
-			StartupTimeout:   Duration(DefaultStartupTimeout),
-			FailoverCooldown: Duration(DefaultFailoverCooldown),
+			ProxyRotationInterval:   Duration(DefaultRotationInterval),
+			StartupReadyTimeout:     Duration(DefaultStartupTimeout),
+			FailoverAttemptCooldown: Duration(DefaultFailoverCooldown),
 		},
 		Health: HealthConfig{
-			CheckURLs:      []string{DefaultCheckURL},
-			CheckInterval:  Duration(DefaultCheckInterval),
-			ReadyTTL:       Duration(DefaultReadyTTL),
-			Timeout:        Duration(DefaultCheckTimeout),
-			Concurrency:    DefaultCheckConcurrency,
-			Jitter:         Duration(DefaultCheckJitter),
-			MaxBytes:       DefaultCheckMaxBytes,
-			ReadySuccesses: DefaultReadySuccesses,
+			FullDownloadCheckURLs:     []string{DefaultCheckURL},
+			ActiveRoutesCheckInterval: Duration(DefaultCheckInterval),
+			SuccessfulCheckReadyTTL:   Duration(DefaultReadyTTL),
+			FullDownloadCheckTimeout:  Duration(DefaultCheckTimeout),
+			MaxConcurrentChecks:       DefaultCheckConcurrency,
+			CheckStartJitter:          Duration(DefaultCheckJitter),
+			MaxDownloadBytes:          DefaultCheckMaxBytes,
+			RequiredSuccessfulChecks:  DefaultReadySuccesses,
+			FailedChecksBeforeRetire:  DefaultRetireFailures,
 		},
 	}
 }
 
-func Load(path string) (Config, error) {
+func New(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
@@ -141,6 +144,10 @@ func Load(path string) (Config, error) {
 	}
 
 	return config, nil
+}
+
+func Load(path string) (Config, error) {
+	return New(path)
 }
 
 func Save(path string, config Config) error {
@@ -160,70 +167,73 @@ func Save(path string, config Config) error {
 }
 
 func (config Config) Validate() error {
-	if strings.TrimSpace(config.Log.Level) == "" {
-		return fmt.Errorf("log.level is required")
+	if strings.TrimSpace(config.Log.MinimumLevel) == "" {
+		return fmt.Errorf("log.minimum_level is required")
 	}
-	if strings.TrimSpace(config.Source.File) == "" {
-		return fmt.Errorf("source.file is required")
+	if strings.TrimSpace(config.Source.ProxyListFilePath) == "" {
+		return fmt.Errorf("source.proxy_list_file_path is required")
 	}
-	if strings.TrimSpace(config.Xray.BinaryPath) == "" {
-		return fmt.Errorf("xray.binary_path is required")
+	if strings.TrimSpace(config.Xray.ExecutablePath) == "" {
+		return fmt.Errorf("xray.executable_path is required")
 	}
-	if strings.TrimSpace(config.Xray.GeneratedPath) == "" {
-		return fmt.Errorf("xray.generated_path is required")
+	if strings.TrimSpace(config.Xray.GeneratedConfigPath) == "" {
+		return fmt.Errorf("xray.generated_config_path is required")
 	}
-	if strings.TrimSpace(config.Xray.APIAddress) == "" {
-		return fmt.Errorf("xray.api_address is required")
+	if strings.TrimSpace(config.Xray.GRPCAPIAddress) == "" {
+		return fmt.Errorf("xray.grpc_api_address is required")
 	}
-	if strings.TrimSpace(config.Xray.GeneratedLogLevel) == "" {
-		return fmt.Errorf("xray.generated_log_level is required")
+	if strings.TrimSpace(config.Xray.GeneratedConfigLogLevel) == "" {
+		return fmt.Errorf("xray.generated_config_log_level is required")
 	}
-	if config.Xray.Sampling <= 0 {
-		return fmt.Errorf("xray.sampling must be positive")
+	if config.Xray.ObservatorySampling <= 0 {
+		return fmt.Errorf("xray.observatory_sampling must be positive")
 	}
-	if strings.TrimSpace(config.Status.Address) == "" {
-		return fmt.Errorf("status.address is required")
+	if strings.TrimSpace(config.Status.ListenAddress) == "" {
+		return fmt.Errorf("status.listen_address is required")
 	}
-	if err := validatePositiveDuration("xray.ping_timeout", config.Xray.PingTimeout); err != nil {
+	if err := validatePositiveDuration("xray.observatory_ping_timeout", config.Xray.ObservatoryPingTimeout); err != nil {
 		return err
 	}
-	if err := validatePositiveDuration("runtime.rotation_interval", config.Runtime.RotationInterval); err != nil {
+	if err := validatePositiveDuration("runtime.proxy_rotation_interval", config.Runtime.ProxyRotationInterval); err != nil {
 		return err
 	}
-	if err := validatePositiveDuration("runtime.startup_timeout", config.Runtime.StartupTimeout); err != nil {
+	if err := validatePositiveDuration("runtime.startup_ready_timeout", config.Runtime.StartupReadyTimeout); err != nil {
 		return err
 	}
-	if time.Duration(config.Runtime.FailoverCooldown) < 0 {
-		return fmt.Errorf("runtime.failover_cooldown cannot be negative")
+	if time.Duration(config.Runtime.FailoverAttemptCooldown) < 0 {
+		return fmt.Errorf("runtime.failover_attempt_cooldown cannot be negative")
 	}
-	if len(config.Health.CheckURLs) == 0 {
-		return fmt.Errorf("health.check_urls must not be empty")
+	if len(config.Health.FullDownloadCheckURLs) == 0 {
+		return fmt.Errorf("health.full_download_check_urls must not be empty")
 	}
-	for _, rawURL := range config.Health.CheckURLs {
+	for _, rawURL := range config.Health.FullDownloadCheckURLs {
 		if err := validateHTTPURL(rawURL); err != nil {
-			return fmt.Errorf("health.check_urls: %w", err)
+			return fmt.Errorf("health.full_download_check_urls: %w", err)
 		}
 	}
-	if err := validatePositiveDuration("health.check_interval", config.Health.CheckInterval); err != nil {
+	if err := validatePositiveDuration("health.active_routes_check_interval", config.Health.ActiveRoutesCheckInterval); err != nil {
 		return err
 	}
-	if err := validatePositiveDuration("health.ready_ttl", config.Health.ReadyTTL); err != nil {
+	if err := validatePositiveDuration("health.successful_check_ready_ttl", config.Health.SuccessfulCheckReadyTTL); err != nil {
 		return err
 	}
-	if err := validatePositiveDuration("health.timeout", config.Health.Timeout); err != nil {
+	if err := validatePositiveDuration("health.full_download_check_timeout", config.Health.FullDownloadCheckTimeout); err != nil {
 		return err
 	}
-	if time.Duration(config.Health.Jitter) < 0 {
-		return fmt.Errorf("health.jitter cannot be negative")
+	if time.Duration(config.Health.CheckStartJitter) < 0 {
+		return fmt.Errorf("health.check_start_jitter cannot be negative")
 	}
-	if config.Health.Concurrency <= 0 {
-		return fmt.Errorf("health.concurrency must be positive")
+	if config.Health.MaxConcurrentChecks <= 0 {
+		return fmt.Errorf("health.max_concurrent_checks must be positive")
 	}
-	if config.Health.MaxBytes < 0 {
-		return fmt.Errorf("health.max_bytes cannot be negative")
+	if config.Health.MaxDownloadBytes < 0 {
+		return fmt.Errorf("health.max_download_bytes cannot be negative")
 	}
-	if config.Health.ReadySuccesses <= 0 {
-		return fmt.Errorf("health.ready_successes must be positive")
+	if config.Health.RequiredSuccessfulChecks <= 0 {
+		return fmt.Errorf("health.required_successful_checks must be positive")
+	}
+	if config.Health.FailedChecksBeforeRetire <= 0 {
+		return fmt.Errorf("health.failed_checks_before_retire must be positive")
 	}
 
 	return nil

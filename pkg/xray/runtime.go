@@ -14,11 +14,11 @@ import (
 const ShutdownTimeout = 10 * time.Second
 
 type Runtime struct {
-	BinaryPath string
+	ExecutablePath string
 }
 
-func NewRuntime(binaryPath string) Runtime {
-	return Runtime{BinaryPath: binaryPath}
+func NewRuntime(executablePath string) Runtime {
+	return Runtime{ExecutablePath: executablePath}
 }
 
 type Process struct {
@@ -27,7 +27,7 @@ type Process struct {
 }
 
 func (r Runtime) Start(configPath string) (*Process, error) {
-	cmd := exec.Command(r.BinaryPath, "run", "-config", configPath)
+	cmd := exec.Command(r.ExecutablePath, "run", "-config", configPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -89,7 +89,7 @@ func (r Runtime) WaitForAPI(ctx context.Context, apiAddress, balancerTag string,
 }
 
 func (r Runtime) BalancerInfo(ctx context.Context, apiAddress, balancerTag string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, r.BinaryPath, "api", "bi", "--server", apiAddress, "--timeout", "2", "--json", balancerTag)
+	cmd := exec.CommandContext(ctx, r.ExecutablePath, "api", "bi", "--server", apiAddress, "--timeout", "2", "--json", balancerTag)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("xray api bi: %w: %s", err, bytes.TrimSpace(output))
@@ -98,7 +98,7 @@ func (r Runtime) BalancerInfo(ctx context.Context, apiAddress, balancerTag strin
 }
 
 func (r Runtime) OverrideBalancer(ctx context.Context, apiAddress, balancerTag, target string) error {
-	cmd := exec.CommandContext(ctx, r.BinaryPath, "api", "bo", "--server", apiAddress, "--timeout", "3", "-b", balancerTag, target)
+	cmd := exec.CommandContext(ctx, r.ExecutablePath, "api", "bo", "--server", apiAddress, "--timeout", "3", "-b", balancerTag, target)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("xray api bo %s: %w: %s", target, err, bytes.TrimSpace(output))
@@ -110,7 +110,7 @@ func (r Runtime) ValidateConfig(ctx context.Context, configPath string, timeout 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, r.BinaryPath, "run", "-test", "-config", configPath)
+	cmd := exec.CommandContext(ctx, r.ExecutablePath, "run", "-test", "-config", configPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("xray config validation failed: %w: %s", err, bytes.TrimSpace(output))

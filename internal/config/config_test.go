@@ -15,22 +15,22 @@ func TestDefaultConfigIsValid(t *testing.T) {
 
 func TestLoadMergesDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "xpool.yaml")
-	if err := os.WriteFile(path, []byte("source:\n  file: custom.txt\nhealth:\n  concurrency: 7\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("source:\n  proxy_list_file_path: custom.txt\nhealth:\n  max_concurrent_checks: 7\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	config, err := Load(path)
+	config, err := New(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Source.File != "custom.txt" {
-		t.Fatalf("source file = %q", config.Source.File)
+	if config.Source.ProxyListFilePath != "custom.txt" {
+		t.Fatalf("source file = %q", config.Source.ProxyListFilePath)
 	}
-	if config.Health.Concurrency != 7 {
-		t.Fatalf("health concurrency = %d", config.Health.Concurrency)
+	if config.Health.MaxConcurrentChecks != 7 {
+		t.Fatalf("health concurrency = %d", config.Health.MaxConcurrentChecks)
 	}
-	if config.Xray.APIAddress != DefaultAPIAddress {
-		t.Fatalf("xray api = %q", config.Xray.APIAddress)
+	if config.Xray.GRPCAPIAddress != DefaultAPIAddress {
+		t.Fatalf("xray api = %q", config.Xray.GRPCAPIAddress)
 	}
 }
 

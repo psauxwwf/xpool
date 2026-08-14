@@ -1,7 +1,6 @@
 package health
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -17,18 +16,17 @@ func TestPoolRetiresRouteAfterFailedFullDownload(t *testing.T) {
 	defer proxy.Close()
 
 	pool, err := NewPool([]Route{{Tag: "socks-1", ProxyURL: proxy.URL}}, []string{"http://example.com/check"}, Options{
-		CheckInterval:  time.Hour,
-		Timeout:        time.Second,
-		ReadyTTL:       time.Minute,
-		Concurrency:    1,
-		ReadySuccesses: 1,
+		ActiveRoutesCheckInterval: time.Hour,
+		FullDownloadCheckTimeout:  time.Second,
+		SuccessfulCheckReadyTTL:   time.Minute,
+		MaxConcurrentChecks:       1,
+		RequiredSuccessfulChecks:  1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	pool.Start(ctx)
 
 	snapshot := waitSnapshot(t, pool, func(snapshot Snapshot) bool {
@@ -51,19 +49,18 @@ func TestPoolRetiresRouteWhenBodyExceedsLimit(t *testing.T) {
 	defer proxy.Close()
 
 	pool, err := NewPool([]Route{{Tag: "socks-1", ProxyURL: proxy.URL}}, []string{"http://example.com/check"}, Options{
-		CheckInterval:  time.Hour,
-		Timeout:        time.Second,
-		ReadyTTL:       time.Minute,
-		Concurrency:    1,
-		MaxBytes:       4,
-		ReadySuccesses: 1,
+		ActiveRoutesCheckInterval: time.Hour,
+		FullDownloadCheckTimeout:  time.Second,
+		SuccessfulCheckReadyTTL:   time.Minute,
+		MaxConcurrentChecks:       1,
+		MaxDownloadBytes:          4,
+		RequiredSuccessfulChecks:  1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	pool.Start(ctx)
 
 	snapshot := waitSnapshot(t, pool, func(snapshot Snapshot) bool {
@@ -71,6 +68,44 @@ func TestPoolRetiresRouteWhenBodyExceedsLimit(t *testing.T) {
 	})
 	if snapshot.States[0].RetiredReason == "" {
 		t.Fatalf("expected retired reason in snapshot: %+v", snapshot.States[0])
+	}
+}
+
+func TestPoolWaitsForConfiguredFailuresBeforeRetiringRoute(t *testing.T) {
+	t.Parallel()
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "bad proxy", http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+
+	route := Route{Tag: "socks-1", ProxyURL: proxy.URL}
+	pool, err := NewPool([]Route{route}, []string{"http://example.com/check"}, Options{
+		ActiveRoutesCheckInterval: time.Hour,
+		FullDownloadCheckTimeout:  time.Second,
+		SuccessfulCheckReadyTTL:   time.Minute,
+		MaxConcurrentChecks:       1,
+		RequiredSuccessfulChecks:  1,
+		FailedChecksBeforeRetire:  2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pool.checkOnce(route)
+	snapshot := waitSnapshot(t, pool, func(snapshot Snapshot) bool {
+		return snapshot.States[0].ConsecutiveFailures == 1
+	})
+	if snapshot.Retired != 0 || snapshot.States[0].Retired {
+		t.Fatalf("expected route to stay active after first failure: %+v", snapshot.States[0])
+	}
+
+	pool.checkOnce(route)
+	snapshot = waitSnapshot(t, pool, func(snapshot Snapshot) bool {
+		return snapshot.Retired == 1
+	})
+	if snapshot.States[0].ConsecutiveFailures != 2 {
+		t.Fatalf("expected two failures before retire: %+v", snapshot.States[0])
 	}
 }
 

@@ -17,43 +17,6 @@ import (
 	"xpool/pkg/xray"
 )
 
-const (
-	DefaultXrayPath         = appconfig.DefaultXrayPath
-	DefaultConfigPath       = appconfig.DefaultGeneratedPath
-	DefaultStatusAddress    = appconfig.DefaultStatusAddress
-	DefaultRotationInterval = appconfig.DefaultRotationInterval
-	DefaultReadyTTL         = appconfig.DefaultReadyTTL
-	DefaultStartupTimeout   = appconfig.DefaultStartupTimeout
-	DefaultCheckTimeout     = appconfig.DefaultCheckTimeout
-	DefaultCheckConcurrency = appconfig.DefaultCheckConcurrency
-	DefaultCheckJitter      = appconfig.DefaultCheckJitter
-	DefaultCheckMaxBytes    = appconfig.DefaultCheckMaxBytes
-	DefaultReadySuccesses   = appconfig.DefaultReadySuccesses
-	DefaultFailoverCooldown = appconfig.DefaultFailoverCooldown
-)
-
-type Options struct {
-	InputPath         string
-	ConfigPath        string
-	XrayPath          string
-	APIAddress        string
-	StatusAddress     string
-	RotationInterval  time.Duration
-	CheckURLs         []string
-	CheckInterval     time.Duration
-	ReadyTTL          time.Duration
-	StartupTimeout    time.Duration
-	CheckTimeout      time.Duration
-	CheckConcurrency  int
-	CheckJitter       time.Duration
-	CheckMaxBytes     int64
-	ReadySuccesses    int
-	FailoverCooldown  time.Duration
-	PingTimeout       time.Duration
-	Sampling          int
-	GeneratedLogLevel string
-}
-
 type SourceStatus struct {
 	Name          string                 `json:"name"`
 	LoadedAt      string                 `json:"loaded_at"`
@@ -63,20 +26,20 @@ type SourceStatus struct {
 }
 
 type Status struct {
-	Healthy          bool            `json:"healthy"`
-	Serving          bool            `json:"serving"`
-	StartedAt        string          `json:"started_at"`
-	Uptime           string          `json:"uptime"`
-	XrayAPIReady     bool            `json:"xray_api_ready"`
-	XrayPID          int             `json:"xray_pid"`
-	Current          string          `json:"current,omitempty"`
-	BalancerTag      string          `json:"balancer_tag"`
-	RotationInterval string          `json:"rotation_interval"`
-	FailoverCooldown string          `json:"failover_cooldown"`
-	NextRotationAt   any             `json:"next_rotation_at"`
-	Source           SourceStatus    `json:"source"`
-	Pool             health.Snapshot `json:"pool"`
-	Switches         SwitchStatus    `json:"switches"`
+	Healthy                 bool            `json:"healthy"`
+	Serving                 bool            `json:"serving"`
+	StartedAt               string          `json:"started_at"`
+	Uptime                  string          `json:"uptime"`
+	XrayAPIReady            bool            `json:"xray_api_ready"`
+	XrayPID                 int             `json:"xray_pid"`
+	Current                 string          `json:"current,omitempty"`
+	BalancerTag             string          `json:"balancer_tag"`
+	ProxyRotationInterval   string          `json:"proxy_rotation_interval"`
+	FailoverAttemptCooldown string          `json:"failover_attempt_cooldown"`
+	NextRotationAt          any             `json:"next_rotation_at"`
+	Source                  SourceStatus    `json:"source"`
+	Pool                    health.Snapshot `json:"pool"`
+	Switches                SwitchStatus    `json:"switches"`
 }
 
 type SwitchStatus struct {
@@ -91,18 +54,16 @@ type SwitchStatus struct {
 	LastErrorReason string `json:"last_error_reason,omitempty"`
 }
 
-func Run(ctx context.Context, options Options) error {
-	options = withDefaults(options)
-	return RunWithSource(ctx, options, source.NewFile(options.InputPath))
+func Run(ctx context.Context, config appconfig.Config) error {
+	return RunWithSource(ctx, config, source.NewFile(config.Source.ProxyListFilePath))
 }
 
-func RunWithSource(ctx context.Context, options Options, proxySource source.Source) error {
-	options = withDefaults(options)
-	if err := validateOptions(options); err != nil {
+func RunWithSource(ctx context.Context, config appconfig.Config, proxySource source.Source) error {
+	if err := config.Validate(); err != nil {
 		return err
 	}
 	if proxySource == nil {
-		proxySource = source.NewFile(options.InputPath)
+		proxySource = source.NewFile(config.Source.ProxyListFilePath)
 	}
 
 	sourceResult, err := proxySource.Load(ctx)
@@ -113,60 +74,53 @@ func RunWithSource(ctx context.Context, options Options, proxySource source.Sour
 		return fmt.Errorf("no valid proxies found in %s (invalid: %d)", sourceResult.Name, sourceResult.InvalidCount)
 	}
 
-	generator := configgen.NewGenerator(configgen.Options{
-		OutputPath:    options.ConfigPath,
-		APIAddress:    options.APIAddress,
-		CheckURLs:     options.CheckURLs,
-		CheckInterval: options.CheckInterval,
-		PingTimeout:   options.PingTimeout,
-		Sampling:      options.Sampling,
-		LogLevel:      options.GeneratedLogLevel,
-	})
+	generator := configgen.NewGenerator(config)
 	result, err := generator.Generate(sourceResult.Proxies)
 	if err != nil {
 		return err
 	}
-	slog.Info("generated Xray config", "path", result.OutputPath, "source", sourceResult.Name, "proxies", result.ProxyCount)
-	xrayRuntime := xray.NewRuntime(options.XrayPath)
-	if err := xrayRuntime.ValidateConfig(ctx, options.ConfigPath, options.StartupTimeout); err != nil {
+	slog.Info("generated Xray config", "path", result.GeneratedConfigPath, "source", sourceResult.Name, "proxies", result.ProxyCount)
+	xrayRuntime := xray.NewRuntime(config.Xray.ExecutablePath)
+	if err := xrayRuntime.ValidateConfig(ctx, config.Xray.GeneratedConfigPath, config.Runtime.StartupReadyTimeout.Duration()); err != nil {
 		return err
 	}
-	slog.Info("validated Xray config", "path", options.ConfigPath)
+	slog.Info("validated Xray config", "path", config.Xray.GeneratedConfigPath)
 
-	process, err := xrayRuntime.Start(options.ConfigPath)
+	process, err := xrayRuntime.Start(config.Xray.GeneratedConfigPath)
 	if err != nil {
 		return err
 	}
 	defer process.Stop()
 
-	if err := xrayRuntime.WaitForAPI(ctx, options.APIAddress, configgen.DefaultBalancerTag, options.StartupTimeout); err != nil {
+	if err := xrayRuntime.WaitForAPI(ctx, config.Xray.GRPCAPIAddress, configgen.DefaultBalancerTag, config.Runtime.StartupReadyTimeout.Duration()); err != nil {
 		return fmt.Errorf("wait for Xray API: %w", err)
 	}
-	slog.Info("Xray API is ready", "api", options.APIAddress)
+	slog.Info("Xray API is ready", "api", config.Xray.GRPCAPIAddress)
 
-	pool, err := health.NewPool(result.CheckRoutes, options.CheckURLs, health.Options{
-		CheckInterval:  options.CheckInterval,
-		Timeout:        options.CheckTimeout,
-		ReadyTTL:       options.ReadyTTL,
-		Concurrency:    options.CheckConcurrency,
-		Jitter:         options.CheckJitter,
-		MaxBytes:       options.CheckMaxBytes,
-		ReadySuccesses: options.ReadySuccesses,
+	pool, err := health.NewPool(result.CheckRoutes, config.Health.FullDownloadCheckURLs, health.Options{
+		ActiveRoutesCheckInterval: config.Health.ActiveRoutesCheckInterval.Duration(),
+		FullDownloadCheckTimeout:  config.Health.FullDownloadCheckTimeout.Duration(),
+		SuccessfulCheckReadyTTL:   config.Health.SuccessfulCheckReadyTTL.Duration(),
+		MaxConcurrentChecks:       config.Health.MaxConcurrentChecks,
+		CheckStartJitter:          config.Health.CheckStartJitter.Duration(),
+		MaxDownloadBytes:          config.Health.MaxDownloadBytes,
+		RequiredSuccessfulChecks:  config.Health.RequiredSuccessfulChecks,
+		FailedChecksBeforeRetire:  config.Health.FailedChecksBeforeRetire,
 	})
 	if err != nil {
 		return err
 	}
 	controller := NewController(ControllerOptions{
-		xrayRuntime:      xrayRuntime,
-		apiAddress:       options.APIAddress,
-		balancerTag:      configgen.DefaultBalancerTag,
-		rotationInterval: options.RotationInterval,
-		failoverCooldown: options.FailoverCooldown,
-		startupTimeout:   options.StartupTimeout,
-		pool:             pool,
-		startedAt:        time.Now(),
-		xrayAPIReady:     true,
-		xrayPID:          process.PID(),
+		xrayRuntime:             xrayRuntime,
+		apiAddress:              config.Xray.GRPCAPIAddress,
+		balancerTag:             configgen.DefaultBalancerTag,
+		proxyRotationInterval:   config.Runtime.ProxyRotationInterval.Duration(),
+		failoverAttemptCooldown: config.Runtime.FailoverAttemptCooldown.Duration(),
+		startupReadyTimeout:     config.Runtime.StartupReadyTimeout.Duration(),
+		pool:                    pool,
+		startedAt:               time.Now(),
+		xrayAPIReady:            true,
+		xrayPID:                 process.PID(),
 		source: SourceStatus{
 			Name:          sourceResult.Name,
 			LoadedAt:      sourceResult.LoadedAt.UTC().Format(time.RFC3339),
@@ -175,7 +129,7 @@ func RunWithSource(ctx context.Context, options Options, proxySource source.Sour
 			InvalidErrors: sourceResult.InvalidErrors,
 		},
 	})
-	statusServer, err := startStatusServer(ctx, options.StatusAddress, controller)
+	statusServer, err := startStatusServer(ctx, config.Status.ListenAddress, controller)
 	if err != nil {
 		return err
 	}
@@ -187,58 +141,58 @@ func RunWithSource(ctx context.Context, options Options, proxySource source.Sour
 }
 
 type Controller struct {
-	xrayRuntime      xray.Runtime
-	apiAddress       string
-	balancerTag      string
-	rotationInterval time.Duration
-	failoverCooldown time.Duration
-	startupTimeout   time.Duration
-	pool             *health.Pool
-	current          string
-	serving          bool
-	startedAt        time.Time
-	xrayAPIReady     bool
-	xrayPID          int
-	source           SourceStatus
-	rotations        int64
-	failovers        int64
-	switchFailures   int64
-	lastReason       string
-	lastSelectedAt   time.Time
-	lastRotationAt   time.Time
-	lastFailoverAt   time.Time
-	lastError        string
-	lastErrorReason  string
-	mu               sync.RWMutex
+	xrayRuntime             xray.Runtime
+	apiAddress              string
+	balancerTag             string
+	proxyRotationInterval   time.Duration
+	failoverAttemptCooldown time.Duration
+	startupReadyTimeout     time.Duration
+	pool                    *health.Pool
+	current                 string
+	serving                 bool
+	startedAt               time.Time
+	xrayAPIReady            bool
+	xrayPID                 int
+	source                  SourceStatus
+	rotations               int64
+	failovers               int64
+	switchFailures          int64
+	lastReason              string
+	lastSelectedAt          time.Time
+	lastRotationAt          time.Time
+	lastFailoverAt          time.Time
+	lastError               string
+	lastErrorReason         string
+	mu                      sync.RWMutex
 }
 
 type ControllerOptions struct {
-	xrayRuntime      xray.Runtime
-	apiAddress       string
-	balancerTag      string
-	rotationInterval time.Duration
-	failoverCooldown time.Duration
-	startupTimeout   time.Duration
-	pool             *health.Pool
-	startedAt        time.Time
-	xrayAPIReady     bool
-	xrayPID          int
-	source           SourceStatus
+	xrayRuntime             xray.Runtime
+	apiAddress              string
+	balancerTag             string
+	proxyRotationInterval   time.Duration
+	failoverAttemptCooldown time.Duration
+	startupReadyTimeout     time.Duration
+	pool                    *health.Pool
+	startedAt               time.Time
+	xrayAPIReady            bool
+	xrayPID                 int
+	source                  SourceStatus
 }
 
 func NewController(options ControllerOptions) *Controller {
 	return &Controller{
-		xrayRuntime:      options.xrayRuntime,
-		apiAddress:       options.apiAddress,
-		balancerTag:      options.balancerTag,
-		rotationInterval: options.rotationInterval,
-		failoverCooldown: options.failoverCooldown,
-		startupTimeout:   options.startupTimeout,
-		pool:             options.pool,
-		startedAt:        options.startedAt,
-		xrayAPIReady:     options.xrayAPIReady,
-		xrayPID:          options.xrayPID,
-		source:           options.source,
+		xrayRuntime:             options.xrayRuntime,
+		apiAddress:              options.apiAddress,
+		balancerTag:             options.balancerTag,
+		proxyRotationInterval:   options.proxyRotationInterval,
+		failoverAttemptCooldown: options.failoverAttemptCooldown,
+		startupReadyTimeout:     options.startupReadyTimeout,
+		pool:                    options.pool,
+		startedAt:               options.startedAt,
+		xrayAPIReady:            options.xrayAPIReady,
+		xrayPID:                 options.xrayPID,
+		source:                  options.source,
 	}
 }
 
@@ -251,7 +205,7 @@ func (c *Controller) Run(ctx context.Context, xrayDone <-chan error) error {
 		return err
 	}
 
-	rotationTicker := time.NewTicker(c.rotationInterval)
+	rotationTicker := time.NewTicker(c.proxyRotationInterval)
 	defer rotationTicker.Stop()
 	failoverTicker := time.NewTicker(time.Second)
 	defer failoverTicker.Stop()
@@ -286,7 +240,7 @@ func (c *Controller) Run(ctx context.Context, xrayDone <-chan error) error {
 }
 
 func (c *Controller) waitReady(ctx context.Context, xrayDone <-chan error) error {
-	ctx, cancel := context.WithTimeout(ctx, c.startupTimeout)
+	ctx, cancel := context.WithTimeout(ctx, c.startupReadyTimeout)
 	defer cancel()
 
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -299,7 +253,7 @@ func (c *Controller) waitReady(ctx context.Context, xrayDone <-chan error) error
 
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("ready pool is empty after %s", c.startupTimeout)
+			return fmt.Errorf("ready pool is empty after %s", c.startupReadyTimeout)
 		case err := <-xrayDone:
 			if err != nil {
 				return fmt.Errorf("Xray exited before ready pool initialized: %w", err)
@@ -372,22 +326,22 @@ func (c *Controller) Status() Status {
 	}
 	nextRotationAt := any(nil)
 	if !c.lastSelectedAt.IsZero() {
-		nextRotationAt = c.lastSelectedAt.Add(c.rotationInterval).UTC().Format(time.RFC3339)
+		nextRotationAt = c.lastSelectedAt.Add(c.proxyRotationInterval).UTC().Format(time.RFC3339)
 	}
 	return Status{
-		Healthy:          pool.Ready > 0,
-		Serving:          c.serving && currentReady,
-		StartedAt:        c.startedAt.UTC().Format(time.RFC3339),
-		Uptime:           time.Since(c.startedAt).Round(time.Second).String(),
-		XrayAPIReady:     c.xrayAPIReady,
-		XrayPID:          c.xrayPID,
-		Current:          c.current,
-		BalancerTag:      c.balancerTag,
-		RotationInterval: c.rotationInterval.String(),
-		FailoverCooldown: c.failoverCooldown.String(),
-		NextRotationAt:   nextRotationAt,
-		Source:           c.source,
-		Pool:             pool,
+		Healthy:                 pool.Ready > 0,
+		Serving:                 c.serving && currentReady,
+		StartedAt:               c.startedAt.UTC().Format(time.RFC3339),
+		Uptime:                  time.Since(c.startedAt).Round(time.Second).String(),
+		XrayAPIReady:            c.xrayAPIReady,
+		XrayPID:                 c.xrayPID,
+		Current:                 c.current,
+		BalancerTag:             c.balancerTag,
+		ProxyRotationInterval:   c.proxyRotationInterval.String(),
+		FailoverAttemptCooldown: c.failoverAttemptCooldown.String(),
+		NextRotationAt:          nextRotationAt,
+		Source:                  c.source,
+		Pool:                    pool,
 		Switches: SwitchStatus{
 			Rotations:       c.rotations,
 			Failovers:       c.failovers,
@@ -441,10 +395,10 @@ func (c *Controller) recordSwitchFailure(reason string, err error) {
 func (c *Controller) inFailoverCooldown() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if c.failoverCooldown <= 0 || c.lastSelectedAt.IsZero() {
+	if c.failoverAttemptCooldown <= 0 || c.lastSelectedAt.IsZero() {
 		return false
 	}
-	return time.Since(c.lastSelectedAt) < c.failoverCooldown
+	return time.Since(c.lastSelectedAt) < c.failoverAttemptCooldown
 }
 
 func startStatusServer(ctx context.Context, address string, controller *Controller) (*http.Server, error) {
@@ -494,120 +448,4 @@ func shutdownStatusServer(server *http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctx)
-}
-
-func withDefaults(options Options) Options {
-	if options.InputPath == "" {
-		options.InputPath = appconfig.DefaultInputPath
-	}
-	if options.ConfigPath == "" {
-		options.ConfigPath = DefaultConfigPath
-	}
-	if options.XrayPath == "" {
-		options.XrayPath = DefaultXrayPath
-	}
-	if options.APIAddress == "" {
-		options.APIAddress = appconfig.DefaultAPIAddress
-	}
-	if options.StatusAddress == "" {
-		options.StatusAddress = DefaultStatusAddress
-	}
-	if options.RotationInterval == 0 {
-		options.RotationInterval = DefaultRotationInterval
-	}
-	if len(options.CheckURLs) == 0 {
-		options.CheckURLs = []string{appconfig.DefaultCheckURL}
-	}
-	if options.CheckInterval == 0 {
-		options.CheckInterval = appconfig.DefaultCheckInterval
-	}
-	if options.ReadyTTL == 0 {
-		options.ReadyTTL = DefaultReadyTTL
-	}
-	if options.StartupTimeout == 0 {
-		options.StartupTimeout = DefaultStartupTimeout
-	}
-	if options.CheckTimeout == 0 {
-		options.CheckTimeout = DefaultCheckTimeout
-	}
-	if options.CheckConcurrency == 0 {
-		options.CheckConcurrency = DefaultCheckConcurrency
-	}
-	if options.CheckJitter == 0 {
-		options.CheckJitter = DefaultCheckJitter
-	}
-	if options.CheckMaxBytes == 0 {
-		options.CheckMaxBytes = DefaultCheckMaxBytes
-	}
-	if options.ReadySuccesses == 0 {
-		options.ReadySuccesses = DefaultReadySuccesses
-	}
-	if options.FailoverCooldown == 0 {
-		options.FailoverCooldown = DefaultFailoverCooldown
-	}
-	if options.PingTimeout == 0 {
-		options.PingTimeout = appconfig.DefaultPingTimeout
-	}
-	if options.Sampling == 0 {
-		options.Sampling = appconfig.DefaultSampling
-	}
-	if options.GeneratedLogLevel == "" {
-		options.GeneratedLogLevel = appconfig.DefaultGeneratedLogLevel
-	}
-	return options
-}
-
-func validateOptions(options Options) error {
-	if options.InputPath == "" {
-		return fmt.Errorf("input path is required")
-	}
-	if options.ConfigPath == "" {
-		return fmt.Errorf("config path is required")
-	}
-	if options.XrayPath == "" {
-		return fmt.Errorf("Xray path is required")
-	}
-	if options.APIAddress == "" {
-		return fmt.Errorf("API address is required")
-	}
-	if options.StatusAddress == "" {
-		return fmt.Errorf("status address is required")
-	}
-	if options.RotationInterval <= 0 {
-		return fmt.Errorf("rotation interval must be positive")
-	}
-	if options.CheckInterval <= 0 {
-		return fmt.Errorf("check interval must be positive")
-	}
-	if options.ReadyTTL <= 0 {
-		return fmt.Errorf("ready TTL must be positive")
-	}
-	if options.StartupTimeout <= 0 {
-		return fmt.Errorf("startup timeout must be positive")
-	}
-	if options.CheckTimeout <= 0 {
-		return fmt.Errorf("check timeout must be positive")
-	}
-	if options.CheckConcurrency <= 0 {
-		return fmt.Errorf("check concurrency must be positive")
-	}
-	if options.CheckJitter < 0 {
-		return fmt.Errorf("check jitter cannot be negative")
-	}
-	if options.CheckMaxBytes < 0 {
-		return fmt.Errorf("check max bytes cannot be negative")
-	}
-	if options.ReadySuccesses <= 0 {
-		return fmt.Errorf("ready successes must be positive")
-	}
-	if options.FailoverCooldown < 0 {
-		return fmt.Errorf("failover cooldown cannot be negative")
-	}
-	if options.PingTimeout <= 0 {
-		return fmt.Errorf("ping timeout must be positive")
-	}
-	if options.Sampling <= 0 {
-		return fmt.Errorf("sampling must be positive")
-	}
-	return nil
 }

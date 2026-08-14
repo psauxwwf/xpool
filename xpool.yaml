@@ -1,28 +1,67 @@
+# Настройки логов самого xpool.
 log:
-  level: info
-  path: ""
+  # Минимальный уровень логирования xpool: debug, info, warn или error.
+  # Чем ниже уровень, тем больше диагностических сообщений.
+  minimum_level: info
+  # Путь к JSON-логу в файл. Пустая строка отключает файловый лог.
+  file_path: ""
+
+# Источник upstream-прокси.
 source:
-  file: proxy.txt
+  # Файл со списком прокси в формате socks5h://user:pass@host:port.
+  # Невалидные строки пропускаются и видны в /status.
+  proxy_list_file_path: proxy.txt
+
+# Настройки Xray, который xpool запускает и контролирует.
 xray:
-  binary_path: xray
-  generated_path: config.json
-  api_address: 127.0.0.1:10085
-  generated_log_level: warning
-  ping_timeout: 5s
-  sampling: 3
+  # Путь к бинарю Xray. Можно указать просто xray, если он есть в PATH.
+  executable_path: xray
+  # Куда сохранять сгенерированный Xray config. Файл может содержать credentials.
+  generated_config_path: config.json
+  # Локальный адрес Xray gRPC API для чтения balancer state и override выбранного outbound.
+  grpc_api_address: 127.0.0.1:10085
+  # Уровень логов внутри сгенерированного Xray config.
+  # Это не уровень логов самого xpool.
+  generated_config_log_level: warning
+  # Timeout для Xray burst observatory ping/check.
+  observatory_ping_timeout: 5s
+  # Сколько измерений Xray использует при оценке latency outbound-ов.
+  observatory_sampling: 3
+
+# Локальный status API самого xpool.
 status:
-  address: 127.0.0.1:18080
+  # Адрес, на котором доступны /healthz и /status.
+  listen_address: 127.0.0.1:18080
+
+# Настройки controller-а, который выбирает ready proxy и переключает Xray balancer.
 runtime:
-  rotation_interval: 1m0s
-  startup_timeout: 30s
-  failover_cooldown: 5s
+  # Как часто планово менять текущий ready proxy для новых соединений.
+  proxy_rotation_interval: 1m0s
+  # Сколько ждать запуска Xray API и появления первого ready proxy при старте.
+  startup_ready_timeout: 30s
+  # Минимальная пауза между failover-попытками, если текущий proxy перестал быть ready.
+  failover_attempt_cooldown: 5s
+
+# Настройки background health pool.
 health:
-  check_urls:
+  # URL-ы, которые полностью скачиваются через каждый proxy route.
+  # Route считается успешным только если все URL вернули 2xx/3xx и тело скачалось.
+  full_download_check_urls:
     - https://web.telegram.org/js/app.js
-  check_interval: 1m0s
-  ready_ttl: 10m0s
-  timeout: 3s
-  concurrency: 32
-  jitter: 5s
-  max_bytes: 10485760
-  ready_successes: 1
+  # Как часто запускать новый batch проверок active routes.
+  active_routes_check_interval: 1m0s
+  # Сколько времени успешная проверка считается свежей для ready status.
+  successful_check_ready_ttl: 10m0s
+  # Timeout одного HTTP health-check запроса через конкретный proxy route.
+  full_download_check_timeout: 3s
+  # Максимум одновременных health-check workers в одном batch.
+  max_concurrent_checks: 32
+  # Детерминированный разброс старта проверок, чтобы не бить по сети одним пиком.
+  check_start_jitter: 5s
+  # Максимум байт, который можно скачать с каждого check URL. 0 отключает лимит.
+  max_download_bytes: 10485760
+  # Сколько успешных проверок подряд нужно, чтобы proxy стал ready.
+  required_successful_checks: 1
+  # Сколько неудачных проверок подряд нужно, чтобы proxy навсегда удалить из active pool
+  # до следующего перезапуска xpool.
+  failed_checks_before_retire: 1

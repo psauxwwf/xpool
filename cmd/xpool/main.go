@@ -17,10 +17,10 @@ import (
 )
 
 type rootOptions struct {
-	ConfigPath string
-	SaveConfig bool
-	LogLevel   string
-	LogPath    string
+	ConfigFilePath string
+	SaveConfig     bool
+	MinimumLevel   string
+	FilePath       string
 }
 
 func main() {
@@ -31,7 +31,7 @@ func main() {
 }
 
 func rootCmd() *cobra.Command {
-	options := rootOptions{ConfigPath: appconfig.DefaultConfigPath}
+	options := rootOptions{ConfigFilePath: appconfig.DefaultConfigPath}
 	root := &cobra.Command{
 		Use:           "xpool",
 		Short:         "Run an Xray proxy ready pool",
@@ -40,7 +40,7 @@ func rootCmd() *cobra.Command {
 		Args:          cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if options.SaveConfig {
-				return saveDefaultConfig(options.ConfigPath)
+				return saveDefaultConfig(options.ConfigFilePath)
 			}
 
 			return cmd.Help()
@@ -50,9 +50,9 @@ func rootCmd() *cobra.Command {
 		},
 	}
 	root.SetHelpCommand(&cobra.Command{Hidden: true})
-	root.PersistentFlags().StringVar(&options.ConfigPath, "config", options.ConfigPath, "path to yaml config")
-	root.PersistentFlags().StringVar(&options.LogLevel, "log-level", "", "override yaml log level: debug, info, warn, error")
-	root.PersistentFlags().StringVar(&options.LogPath, "log-path", "", "optional JSON log file path")
+	root.PersistentFlags().StringVar(&options.ConfigFilePath, "config", options.ConfigFilePath, "path to yaml config")
+	root.PersistentFlags().StringVar(&options.MinimumLevel, "log-level", "", "override yaml log level: debug, info, warn, error")
+	root.PersistentFlags().StringVar(&options.FilePath, "log-path", "", "optional JSON log file path")
 	root.Flags().BoolVar(&options.SaveConfig, "save-config", false, "save default yaml config and exit")
 	root.AddCommand(runCmd(&options))
 
@@ -78,21 +78,21 @@ func runCmd(options *rootOptions) *cobra.Command {
 }
 
 func runConfigured(ctx context.Context, cmd *cobra.Command, options rootOptions) error {
-	fileConfig, err := appconfig.Load(commandConfigPath(cmd, options.ConfigPath))
+	fileConfig, err := appconfig.New(commandConfigPath(cmd, options.ConfigFilePath))
 	if err != nil {
 		return err
 	}
 	if flagChanged(cmd, "log-level") {
-		fileConfig.Log.Level = options.LogLevel
+		fileConfig.Log.MinimumLevel = options.MinimumLevel
 	}
 	if flagChanged(cmd, "log-path") {
-		fileConfig.Log.Path = options.LogPath
+		fileConfig.Log.FilePath = options.FilePath
 	}
-	if err := configureLogger(fileConfig.Log.Level, fileConfig.Log.Path); err != nil {
+	if err := configureLogger(fileConfig.Log.MinimumLevel, fileConfig.Log.FilePath); err != nil {
 		return err
 	}
 
-	return xpool.RunConfig(ctx, fileConfig)
+	return xpool.Run(ctx, fileConfig)
 }
 
 func commandConfigPath(cmd *cobra.Command, configuredPath string) string {

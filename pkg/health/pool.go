@@ -18,18 +18,19 @@ type Route struct {
 }
 
 type Pool struct {
-	routes         []Route
-	checkURLs      []string
-	checkInterval  time.Duration
-	timeout        time.Duration
-	readyTTL       time.Duration
-	concurrency    int
-	jitter         time.Duration
-	maxBytes       int64
-	readySuccesses int
-	states         map[string]State
-	clients        map[string]*http.Client
-	mu             chan func()
+	routes                    []Route
+	fullDownloadCheckURLs     []string
+	activeRoutesCheckInterval time.Duration
+	fullDownloadCheckTimeout  time.Duration
+	successfulCheckReadyTTL   time.Duration
+	maxConcurrentChecks       int
+	checkStartJitter          time.Duration
+	maxDownloadBytes          int64
+	requiredSuccessfulChecks  int
+	failedChecksBeforeRetire  int
+	states                    map[string]State
+	clients                   map[string]*http.Client
+	mu                        chan func()
 }
 
 type State struct {
@@ -46,16 +47,17 @@ type State struct {
 }
 
 type Snapshot struct {
-	Total            int             `json:"total"`
-	Ready            int             `json:"ready"`
-	Retired          int             `json:"retired"`
-	ReadyTTL         string          `json:"ready_ttl"`
-	CheckURLs        []string        `json:"check_urls"`
-	CheckConcurrency int             `json:"check_concurrency"`
-	CheckJitter      string          `json:"check_jitter"`
-	CheckMaxBytes    int64           `json:"check_max_bytes"`
-	ReadySuccesses   int             `json:"ready_successes"`
-	States           []StateSnapshot `json:"states"`
+	Total                    int             `json:"total"`
+	Ready                    int             `json:"ready"`
+	Retired                  int             `json:"retired"`
+	SuccessfulCheckReadyTTL  string          `json:"successful_check_ready_ttl"`
+	FullDownloadCheckURLs    []string        `json:"full_download_check_urls"`
+	MaxConcurrentChecks      int             `json:"max_concurrent_checks"`
+	CheckStartJitter         string          `json:"check_start_jitter"`
+	MaxDownloadBytes         int64           `json:"max_download_bytes"`
+	RequiredSuccessfulChecks int             `json:"required_successful_checks"`
+	FailedChecksBeforeRetire int             `json:"failed_checks_before_retire"`
+	States                   []StateSnapshot `json:"states"`
 }
 
 type StateSnapshot struct {
@@ -73,27 +75,31 @@ type StateSnapshot struct {
 }
 
 type Options struct {
-	CheckInterval  time.Duration
-	Timeout        time.Duration
-	ReadyTTL       time.Duration
-	Concurrency    int
-	Jitter         time.Duration
-	MaxBytes       int64
-	ReadySuccesses int
+	ActiveRoutesCheckInterval time.Duration
+	FullDownloadCheckTimeout  time.Duration
+	SuccessfulCheckReadyTTL   time.Duration
+	MaxConcurrentChecks       int
+	CheckStartJitter          time.Duration
+	MaxDownloadBytes          int64
+	RequiredSuccessfulChecks  int
+	FailedChecksBeforeRetire  int
 }
 
-func NewPool(routes []Route, checkURLs []string, options Options) (*Pool, error) {
-	if options.Concurrency <= 0 || options.Concurrency > len(routes) {
-		options.Concurrency = len(routes)
+func NewPool(routes []Route, fullDownloadCheckURLs []string, options Options) (*Pool, error) {
+	if options.MaxConcurrentChecks <= 0 || options.MaxConcurrentChecks > len(routes) {
+		options.MaxConcurrentChecks = len(routes)
 	}
-	if options.ReadySuccesses <= 0 {
-		options.ReadySuccesses = 1
+	if options.RequiredSuccessfulChecks <= 0 {
+		options.RequiredSuccessfulChecks = 1
+	}
+	if options.FailedChecksBeforeRetire <= 0 {
+		options.FailedChecksBeforeRetire = 1
 	}
 
 	states := make(map[string]State, len(routes))
 	clients := make(map[string]*http.Client, len(routes))
 	for _, route := range routes {
-		client, err := proxyHTTPClient(route.ProxyURL, options.Timeout)
+		client, err := proxyHTTPClient(route.ProxyURL, options.FullDownloadCheckTimeout)
 		if err != nil {
 			return nil, err
 		}
@@ -102,18 +108,19 @@ func NewPool(routes []Route, checkURLs []string, options Options) (*Pool, error)
 	}
 
 	pool := &Pool{
-		routes:         routes,
-		checkURLs:      checkURLs,
-		checkInterval:  options.CheckInterval,
-		timeout:        options.Timeout,
-		readyTTL:       options.ReadyTTL,
-		concurrency:    options.Concurrency,
-		jitter:         options.Jitter,
-		maxBytes:       options.MaxBytes,
-		readySuccesses: options.ReadySuccesses,
-		states:         states,
-		clients:        clients,
-		mu:             make(chan func()),
+		routes:                    routes,
+		fullDownloadCheckURLs:     fullDownloadCheckURLs,
+		activeRoutesCheckInterval: options.ActiveRoutesCheckInterval,
+		fullDownloadCheckTimeout:  options.FullDownloadCheckTimeout,
+		successfulCheckReadyTTL:   options.SuccessfulCheckReadyTTL,
+		maxConcurrentChecks:       options.MaxConcurrentChecks,
+		checkStartJitter:          options.CheckStartJitter,
+		maxDownloadBytes:          options.MaxDownloadBytes,
+		requiredSuccessfulChecks:  options.RequiredSuccessfulChecks,
+		failedChecksBeforeRetire:  options.FailedChecksBeforeRetire,
+		states:                    states,
+		clients:                   clients,
+		mu:                        make(chan func()),
 	}
 	go pool.serialize()
 	return pool, nil
@@ -144,14 +151,15 @@ func (p *Pool) Snapshot() Snapshot {
 	p.mu <- func() {
 		now := time.Now()
 		snapshot := Snapshot{
-			Total:            len(p.states),
-			ReadyTTL:         p.readyTTL.String(),
-			CheckURLs:        append([]string(nil), p.checkURLs...),
-			CheckConcurrency: p.concurrency,
-			CheckJitter:      p.jitter.String(),
-			CheckMaxBytes:    p.maxBytes,
-			ReadySuccesses:   p.readySuccesses,
-			States:           make([]StateSnapshot, 0, len(p.routes)),
+			Total:                    len(p.states),
+			SuccessfulCheckReadyTTL:  p.successfulCheckReadyTTL.String(),
+			FullDownloadCheckURLs:    append([]string(nil), p.fullDownloadCheckURLs...),
+			MaxConcurrentChecks:      p.maxConcurrentChecks,
+			CheckStartJitter:         p.checkStartJitter.String(),
+			MaxDownloadBytes:         p.maxDownloadBytes,
+			RequiredSuccessfulChecks: p.requiredSuccessfulChecks,
+			FailedChecksBeforeRetire: p.failedChecksBeforeRetire,
+			States:                   make([]StateSnapshot, 0, len(p.routes)),
 		}
 		for _, route := range p.routes {
 			state := p.states[route.Tag]
@@ -221,7 +229,7 @@ func (p *Pool) checkScheduler(ctx context.Context) {
 	for {
 		p.checkBatch(ctx)
 
-		timer := time.NewTimer(p.checkInterval)
+		timer := time.NewTimer(p.activeRoutesCheckInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -239,14 +247,12 @@ func (p *Pool) checkBatch(ctx context.Context) {
 
 	jobs := make(chan Route)
 	var workers sync.WaitGroup
-	workerCount := min(p.concurrency, len(routes))
-	for i := 0; i < workerCount; i++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+	workerCount := min(p.maxConcurrentChecks, len(routes))
+	for range workerCount {
+		workers.Go(func() {
 			for route := range jobs {
-				if p.jitter > 0 {
-					timer := time.NewTimer(jitterDelay(route.Tag, p.jitter))
+				if p.checkStartJitter > 0 {
+					timer := time.NewTimer(jitterDelay(route.Tag, p.checkStartJitter))
 					select {
 					case <-ctx.Done():
 						timer.Stop()
@@ -256,7 +262,7 @@ func (p *Pool) checkBatch(ctx context.Context) {
 				}
 				p.checkOnce(route)
 			}
-		}()
+		})
 	}
 
 	for _, route := range routes {
@@ -299,12 +305,18 @@ func (p *Pool) checkOnce(route Route) {
 			state.Alive = false
 			state.LastError = err.Error()
 			state.ConsecutiveFailures++
-			state.Retired = true
-			state.RetiredAt = time.Now()
-			state.RetiredReason = err.Error()
+			if state.ConsecutiveFailures >= p.failedChecksBeforeRetire {
+				state.Retired = true
+				state.RetiredAt = time.Now()
+				state.RetiredReason = err.Error()
+				delete(p.clients, route.Tag)
+			}
 			p.states[route.Tag] = state
-			delete(p.clients, route.Tag)
-			slog.Warn("retired proxy after failed full-download check", "tag", route.Tag, "proxy", route.ProxyURL, "error", err)
+			if state.Retired {
+				slog.Warn("retired proxy after failed full-download check", "tag", route.Tag, "proxy", route.ProxyURL, "failures", state.ConsecutiveFailures, "error", err)
+			} else {
+				slog.Warn("proxy failed full-download check", "tag", route.Tag, "proxy", route.ProxyURL, "failures", state.ConsecutiveFailures, "failed_checks_before_retire", p.failedChecksBeforeRetire, "error", err)
+			}
 			return
 		}
 
@@ -321,8 +333,8 @@ func (p *Pool) checkOnce(route Route) {
 
 func (p *Pool) check(tag string) error {
 	client := p.clients[tag]
-	for _, rawURL := range p.checkURLs {
-		if err := checkURL(client, tag, rawURL, p.maxBytes); err != nil {
+	for _, rawURL := range p.fullDownloadCheckURLs {
+		if err := checkURL(client, tag, rawURL, p.maxDownloadBytes); err != nil {
 			return err
 		}
 	}
@@ -361,7 +373,7 @@ func checkURL(client *http.Client, tag, rawURL string, maxBytes int64) error {
 }
 
 func (p *Pool) isReadyState(state State, now time.Time) bool {
-	return !state.Retired && state.Alive && state.ConsecutiveSuccesses >= p.readySuccesses && now.Sub(state.LastSuccess) <= p.readyTTL
+	return !state.Retired && state.Alive && state.ConsecutiveSuccesses >= p.requiredSuccessfulChecks && now.Sub(state.LastSuccess) <= p.successfulCheckReadyTTL
 }
 
 func jitterDelay(key string, max time.Duration) time.Duration {
