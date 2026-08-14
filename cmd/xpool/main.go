@@ -12,31 +12,15 @@ import (
 	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 
+	appconfig "xpool/internal/config"
 	"xpool/internal/xpool"
 )
 
-const defaultLogLevel = "info"
-
 type rootOptions struct {
-	LogLevel string
-	LogPath  string
-}
-
-type runOptions struct {
-	InputPath         string
-	ConfigPath        string
-	XrayPath          string
-	APIAddress        string
-	StatusAddress     string
-	RotationInterval  string
-	CheckURLsRaw      string
-	CheckInterval     string
-	ReadyTTL          string
-	StartupTimeout    string
-	CheckTimeout      string
-	PingTimeout       string
-	Sampling          int
-	GeneratedLogLevel string
+	ConfigPath string
+	SaveConfig bool
+	LogLevel   string
+	LogPath    string
 }
 
 func main() {
@@ -47,17 +31,18 @@ func main() {
 }
 
 func rootCmd() *cobra.Command {
-	var options rootOptions
+	options := rootOptions{ConfigPath: appconfig.DefaultConfigPath}
 	root := &cobra.Command{
 		Use:           "xpool",
 		Short:         "Run an Xray proxy ready pool",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.NoArgs,
-		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
-			return configureLogger(options.LogLevel, options.LogPath)
-		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if options.SaveConfig {
+				return saveDefaultConfig(options.ConfigPath)
+			}
+
 			return cmd.Help()
 		},
 		CompletionOptions: cobra.CompletionOptions{
@@ -65,105 +50,71 @@ func rootCmd() *cobra.Command {
 		},
 	}
 	root.SetHelpCommand(&cobra.Command{Hidden: true})
-	root.PersistentFlags().StringVar(&options.LogLevel, "log-level", defaultLogLevel, "log level: debug, info, warn, error")
+	root.PersistentFlags().StringVar(&options.ConfigPath, "config", options.ConfigPath, "path to yaml config")
+	root.PersistentFlags().StringVar(&options.LogLevel, "log-level", "", "override yaml log level: debug, info, warn, error")
 	root.PersistentFlags().StringVar(&options.LogPath, "log-path", "", "optional JSON log file path")
-	root.AddCommand(runCmd())
+	root.Flags().BoolVar(&options.SaveConfig, "save-config", false, "save default yaml config and exit")
+	root.AddCommand(runCmd(&options))
 
 	return root
 }
 
-func runCmd() *cobra.Command {
-	options := runOptions{
-		InputPath:         xpool.DefaultInputPath,
-		ConfigPath:        xpool.DefaultConfigPath,
-		XrayPath:          xpool.DefaultXrayPath,
-		APIAddress:        xpool.DefaultAPIAddress,
-		StatusAddress:     xpool.DefaultStatusAddress,
-		RotationInterval:  xpool.DefaultRotationInterval.String(),
-		CheckURLsRaw:      xpool.DefaultCheckURL,
-		CheckInterval:     xpool.DefaultCheckInterval.String(),
-		ReadyTTL:          xpool.DefaultReadyTTL.String(),
-		StartupTimeout:    xpool.DefaultStartupTimeout.String(),
-		CheckTimeout:      xpool.DefaultCheckTimeout.String(),
-		PingTimeout:       xpool.DefaultPingTimeout.String(),
-		Sampling:          xpool.DefaultSampling,
-		GeneratedLogLevel: xpool.DefaultGeneratedLogLevel,
-	}
+func runCmd(options *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:           "run [proxies.txt]",
+		Use:           "run",
 		Short:         "Generate config, run Xray, and rotate ready outbounds",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Args:          cobra.MaximumNArgs(1),
+		Args:          cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 1 {
-				options.InputPath = args[0]
-			}
-			rotationInterval, err := xpool.ParseDuration("rotation-interval", options.RotationInterval)
-			if err != nil {
-				return err
-			}
-			checkURLs, err := xpool.ParseURLs(options.CheckURLsRaw)
-			if err != nil {
-				return err
-			}
-			checkInterval, err := xpool.ParseDuration("check-interval", options.CheckInterval)
-			if err != nil {
-				return err
-			}
-			readyTTL, err := xpool.ParseDuration("ready-ttl", options.ReadyTTL)
-			if err != nil {
-				return err
-			}
-			startupTimeout, err := xpool.ParseDuration("startup-timeout", options.StartupTimeout)
-			if err != nil {
-				return err
-			}
-			checkTimeout, err := xpool.ParseDuration("check-timeout", options.CheckTimeout)
-			if err != nil {
-				return err
-			}
-			pingTimeout, err := xpool.ParseDuration("ping-timeout", options.PingTimeout)
-			if err != nil {
-				return err
-			}
-
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
-			return xpool.Run(ctx, xpool.Options{
-				InputPath:         options.InputPath,
-				ConfigPath:        options.ConfigPath,
-				XrayPath:          options.XrayPath,
-				APIAddress:        options.APIAddress,
-				StatusAddress:     options.StatusAddress,
-				RotationInterval:  rotationInterval,
-				CheckURLs:         checkURLs,
-				CheckInterval:     checkInterval,
-				ReadyTTL:          readyTTL,
-				StartupTimeout:    startupTimeout,
-				CheckTimeout:      checkTimeout,
-				PingTimeout:       pingTimeout,
-				Sampling:          options.Sampling,
-				GeneratedLogLevel: options.GeneratedLogLevel,
-			})
+			return runConfigured(ctx, cmd, *options)
 		},
 	}
-	cmd.Flags().StringVar(&options.ConfigPath, "config", options.ConfigPath, "Xray config path")
-	cmd.Flags().StringVar(&options.XrayPath, "xray", options.XrayPath, "Xray executable path")
-	cmd.Flags().StringVar(&options.APIAddress, "api-addr", options.APIAddress, "Xray API address")
-	cmd.Flags().StringVar(&options.StatusAddress, "status-addr", options.StatusAddress, "status HTTP API address, set to off to disable")
-	cmd.Flags().StringVar(&options.RotationInterval, "rotation-interval", options.RotationInterval, "ready outbound rotation interval")
-	cmd.Flags().StringVar(&options.CheckURLsRaw, "check-url", options.CheckURLsRaw, "comma-separated full-download check URLs")
-	cmd.Flags().StringVar(&options.CheckInterval, "check-interval", options.CheckInterval, "background check interval")
-	cmd.Flags().StringVar(&options.ReadyTTL, "ready-ttl", options.ReadyTTL, "maximum age of a successful check in the ready pool")
-	cmd.Flags().StringVar(&options.StartupTimeout, "startup-timeout", options.StartupTimeout, "maximum wait for Xray API and initial ready pool")
-	cmd.Flags().StringVar(&options.CheckTimeout, "check-timeout", options.CheckTimeout, "full-download background check timeout")
-	cmd.Flags().StringVar(&options.PingTimeout, "ping-timeout", options.PingTimeout, "Xray burst observatory ping timeout")
-	cmd.Flags().IntVar(&options.Sampling, "sampling", options.Sampling, "Xray burst observatory sampling count")
-	cmd.Flags().StringVar(&options.GeneratedLogLevel, "xray-log-level", options.GeneratedLogLevel, "generated Xray log level")
 
 	return cmd
+}
+
+func runConfigured(ctx context.Context, cmd *cobra.Command, options rootOptions) error {
+	fileConfig, err := appconfig.Load(commandConfigPath(cmd, options.ConfigPath))
+	if err != nil {
+		return err
+	}
+	if flagChanged(cmd, "log-level") {
+		fileConfig.Log.Level = options.LogLevel
+	}
+	if flagChanged(cmd, "log-path") {
+		fileConfig.Log.Path = options.LogPath
+	}
+	if err := configureLogger(fileConfig.Log.Level, fileConfig.Log.Path); err != nil {
+		return err
+	}
+
+	return xpool.RunConfig(ctx, fileConfig)
+}
+
+func commandConfigPath(cmd *cobra.Command, configuredPath string) string {
+	if flagChanged(cmd, "config") {
+		return configuredPath
+	}
+
+	return appconfig.ExistingPath("")
+}
+
+func flagChanged(cmd *cobra.Command, name string) bool {
+	flag := cmd.Root().PersistentFlags().Lookup(name)
+	return flag != nil && flag.Changed
+}
+
+func saveDefaultConfig(path string) error {
+	if err := appconfig.Save(path, appconfig.Default()); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stdout, "saved config to %s\n", path)
+	return nil
 }
 
 func configureLogger(levelText, logPath string) error {

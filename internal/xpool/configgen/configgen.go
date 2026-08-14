@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	appconfig "xpool/internal/config"
 	"xpool/pkg/fs"
 	"xpool/pkg/health"
 	"xpool/pkg/xray"
@@ -19,20 +20,18 @@ const (
 	DefaultListenPort     = 8080
 	DefaultLocalListen    = "127.0.0.1"
 	DefaultLocalPort      = 8000
-	DefaultInputPath      = "proxy.txt"
-	DefaultOutputPath     = "config.json"
-	DefaultAPIAddress     = "127.0.0.1:10085"
+	DefaultOutputPath     = appconfig.DefaultGeneratedPath
+	DefaultAPIAddress     = appconfig.DefaultAPIAddress
 	DefaultCheckPortBase  = 18000
-	DefaultCheckURL       = "https://web.telegram.org/js/app.js"
-	DefaultCheckInterval  = time.Minute
-	DefaultPingTimeout    = 5 * time.Second
-	DefaultSampling       = 3
+	DefaultCheckURL       = appconfig.DefaultCheckURL
+	DefaultCheckInterval  = appconfig.DefaultCheckInterval
+	DefaultPingTimeout    = appconfig.DefaultPingTimeout
+	DefaultSampling       = appconfig.DefaultSampling
 	DefaultBalancerTag    = "proxy-balancer"
 	DefaultOutboundPrefix = "socks-"
 )
 
 type Options struct {
-	InputPath     string
 	OutputPath    string
 	APIAddress    string
 	CheckURLs     []string
@@ -57,20 +56,26 @@ type Proxy struct {
 	Port     int
 }
 
-func Generate(options Options) (Result, error) {
-	options = withDefaults(options)
-
-	proxies, err := ReadProxies(options.InputPath)
-	if err != nil {
-		return Result{}, err
-	}
-	return GenerateFromProxies(proxies, options)
+type Generator struct {
+	Options Options
 }
 
-func GenerateFromProxies(proxies []Proxy, options Options) (Result, error) {
-	options = withDefaults(options)
+func NewGenerator(options Options) Generator {
+	return Generator{Options: withDefaults(options)}
+}
+
+type ParseError struct {
+	Line  int    `json:"line"`
+	Error string `json:"error"`
+}
+
+func (g Generator) Generate(proxies []Proxy) (Result, error) {
+	options := withDefaults(g.Options)
 	if len(proxies) == 0 {
 		return Result{}, fmt.Errorf("no proxies found")
+	}
+	if len(proxies) > 65535-DefaultCheckPortBase {
+		return Result{}, fmt.Errorf("too many proxies: %d exceeds local check port capacity", len(proxies))
 	}
 
 	tags := proxyTags(len(proxies))
@@ -93,13 +98,14 @@ func GenerateFromProxies(proxies []Proxy, options Options) (Result, error) {
 	}, nil
 }
 
-func ReadProxies(path string) ([]Proxy, error) {
+func ReadProxies(path string) ([]Proxy, []ParseError, error) {
 	lines, err := fs.ReadLines(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var proxies []Proxy
+	var parseErrors []ParseError
 	for _, rawLine := range lines {
 		line := strings.TrimSpace(rawLine.Text)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -108,12 +114,13 @@ func ReadProxies(path string) ([]Proxy, error) {
 
 		parsed, err := ParseProxy(line)
 		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", rawLine.Number, err)
+			parseErrors = append(parseErrors, ParseError{Line: rawLine.Number, Error: err.Error()})
+			continue
 		}
 		proxies = append(proxies, parsed)
 	}
 
-	return proxies, nil
+	return proxies, parseErrors, nil
 }
 
 func ParseProxy(raw string) (Proxy, error) {
@@ -291,33 +298,7 @@ func checkRoutes(tags []string) []health.Route {
 	return routes
 }
 
-func ParseURLs(raw string) ([]string, error) {
-	parts := strings.Split(raw, ",")
-	urls := make([]string, 0, len(parts))
-	for _, part := range parts {
-		value := strings.TrimSpace(part)
-		if value == "" {
-			continue
-		}
-		parsed, err := url.Parse(value)
-		if err != nil {
-			return nil, fmt.Errorf("parse check URL %q: %w", value, err)
-		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" {
-			return nil, fmt.Errorf("invalid check URL %q", value)
-		}
-		urls = append(urls, value)
-	}
-	if len(urls) == 0 {
-		return nil, fmt.Errorf("no check URLs configured")
-	}
-	return urls, nil
-}
-
 func withDefaults(options Options) Options {
-	if options.InputPath == "" {
-		options.InputPath = DefaultInputPath
-	}
 	if options.OutputPath == "" {
 		options.OutputPath = DefaultOutputPath
 	}

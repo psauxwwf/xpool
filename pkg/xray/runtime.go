@@ -13,13 +13,21 @@ import (
 
 const ShutdownTimeout = 10 * time.Second
 
+type Runtime struct {
+	BinaryPath string
+}
+
+func NewRuntime(binaryPath string) Runtime {
+	return Runtime{BinaryPath: binaryPath}
+}
+
 type Process struct {
 	cmd  *exec.Cmd
 	done <-chan error
 }
 
-func Start(binaryPath, configPath string) (*Process, error) {
-	cmd := exec.Command(binaryPath, "run", "-config", configPath)
+func (r Runtime) Start(configPath string) (*Process, error) {
+	cmd := exec.Command(r.BinaryPath, "run", "-config", configPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -38,6 +46,13 @@ func (p *Process) Done() <-chan error {
 	return p.done
 }
 
+func (p *Process) PID() int {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return 0
+	}
+	return p.cmd.Process.Pid
+}
+
 func (p *Process) Stop() {
 	if p == nil || p.cmd == nil || p.cmd.Process == nil || p.cmd.ProcessState != nil {
 		return
@@ -54,14 +69,14 @@ func (p *Process) Stop() {
 	<-p.done
 }
 
-func WaitForAPI(ctx context.Context, binaryPath, apiAddress, balancerTag string, timeout time.Duration) error {
+func (r Runtime) WaitForAPI(ctx context.Context, apiAddress, balancerTag string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if _, err := BalancerInfo(ctx, binaryPath, apiAddress, balancerTag); err == nil {
+		if _, err := r.BalancerInfo(ctx, apiAddress, balancerTag); err == nil {
 			return nil
 		}
 
@@ -73,8 +88,8 @@ func WaitForAPI(ctx context.Context, binaryPath, apiAddress, balancerTag string,
 	}
 }
 
-func BalancerInfo(ctx context.Context, binaryPath, apiAddress, balancerTag string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, binaryPath, "api", "bi", "--server", apiAddress, "--timeout", "2", "--json", balancerTag)
+func (r Runtime) BalancerInfo(ctx context.Context, apiAddress, balancerTag string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, r.BinaryPath, "api", "bi", "--server", apiAddress, "--timeout", "2", "--json", balancerTag)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("xray api bi: %w: %s", err, bytes.TrimSpace(output))
@@ -82,11 +97,23 @@ func BalancerInfo(ctx context.Context, binaryPath, apiAddress, balancerTag strin
 	return output, nil
 }
 
-func OverrideBalancer(ctx context.Context, binaryPath, apiAddress, balancerTag, target string) error {
-	cmd := exec.CommandContext(ctx, binaryPath, "api", "bo", "--server", apiAddress, "--timeout", "3", "-b", balancerTag, target)
+func (r Runtime) OverrideBalancer(ctx context.Context, apiAddress, balancerTag, target string) error {
+	cmd := exec.CommandContext(ctx, r.BinaryPath, "api", "bo", "--server", apiAddress, "--timeout", "3", "-b", balancerTag, target)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("xray api bo %s: %w: %s", target, err, bytes.TrimSpace(output))
+	}
+	return nil
+}
+
+func (r Runtime) ValidateConfig(ctx context.Context, configPath string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, r.BinaryPath, "run", "-test", "-config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("xray config validation failed: %w: %s", err, bytes.TrimSpace(output))
 	}
 	return nil
 }
